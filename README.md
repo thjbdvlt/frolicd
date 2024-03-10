@@ -1,7 +1,7 @@
 frolicd
 ========
 
-frolic through directory by double key taps.
+frolic through directories by typing small part of their names.
 
 __frolicd__ is a keyboard-based directory browser. its major difference from softwares like [ranger](https://github.com/ranger/ranger), [sfm](https://github.com/afify/sfm), [nnn](https://github.com/jarun/nnn), [lf](https://github.com/gokcehan/lf) or [rover](https://github.com/lecram/rover) is that in __frolicd__, letters are not mapped to _actions_. you use letters to write a small part of the directory's name you want to enter it, and once there is only one directory's name that matches, you automatically jump in this directory. in most cases, 2 letters is enough, sometimes 3, rarely more, i'd say (but, of course, it depends a lot on the way you name and organize directories).
 
