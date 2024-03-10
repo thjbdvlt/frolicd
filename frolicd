@@ -1,0 +1,474 @@
+#!/bin/bash
+
+shorthelp="
+[a-zA-Z0-9_-/][a-zA-Z0-9_-/]
+    select a directory by any part of its name and jump into it.
+    if there is more than one match, filter matches until there is 
+    only one match left.
+    if '<space>' is the first char typed, files will be matched,
+    instead of directory. if <space> is used after some characters,
+    it will initialize a new pattern to filter actual matches. 
+    '/' match name boundaries. '.' has no special meaning if it is
+    inside a pattern (outside a pattern, '.' means 'cd ..').
+    '/.' ('^\.') automatically toggle 'show hidden files' on.
+    examples:
+    1. '<space>/ma' matches file 'maths.md'
+    2. 'ma<space>/in' matches directory 'information/'
+    3. '/c/' matches directory 'c'
+    4. '/.co' matches directory '.config'
+
+.   parent directory
+~   home directory
+,   create new file, returns its name and end.
+!   list and toggle matching options
+:   action (:r=rename, :d=delete, :c=copy, :m=move, :q=quit)
+        the chosen action will be applied on next match. for
+        actions that requires two path (e.g. copy FROM TO),
+        ':.' will be used to chose the destination (2nd argument).
+;   select subdirectory with fzf (if installed)
+'   list bookmarks and jump with label [a-zA-Z]
+       '-   back to previous directory
+       ''   back to the directory where frolicd was called
++   add bookmark
+?   show this help
+<return>    
+     quit
+"
+
+optionhelp="OPTIONS:
+-d dir   start in directory
+-f       match files and directories with [a-z][a-z]
+-h       print help
+-H       show and match hidden files
+-I       show and match ignored files
+-b file  path to custom markfile
+-F       'fuzzy' matching (only effective after initial pattern)
+-n       don't reset pattern after initial two-letter pattern
+-c       Return ask for new file creation before exiting program."
+
+markfile="$HOME/.local/share/frolicd/marks"
+logfile="$HOME/.local/share/frolicd/logs"
+origin=$(pwd)
+
+while getopts "fb:hIHL:d:cFn" flag; do
+    case "$flag" in
+        d) cd "${OPTARG}";;
+        f) matchfile=true;;
+        n) nopatternreset=true;;
+        F) fuzzy=true;;
+        h) echo "$shorthelp"; echo "$optionhelp"; exit 0;;
+        H) hidden=true;;
+        I) ignore=false;;
+        b) markfile="${OPTARG}";;
+        c) endisnewfile=true;;
+        *) exit 1;;
+    esac
+done
+
+# fd are somtimes available as `fdfind`
+if command -v fd 2&>/dev/null; then
+    _fd () { fd $* $fdopts; }
+else 
+    _fd () { fdfind $* $fdopts; }; 
+fi
+
+_countignorehidden() {
+    # display number of ignored and hidden files
+    local n_hidden
+    local n_ignored
+    n_hidden=$(($(fdfind -H -d 1 | wc -l) - $(fdfind -d 1 | wc -l)))
+    n_ignored=$(($(fdfind -I -d 1 | wc -l) - $(fdfind -d 1 | wc -l)))
+    echo "i:${n_ignored:=0} h:${n_hidden:=0}"
+}
+
+_header() {
+    # pretty header with current directory
+    local colorpwd="$1"
+    local colorignorehidden="$2"
+    tput smul; tput setaf "$colorpwd"
+    echo -n "$(pwd | sed "s|$HOME|~|")"
+    tput rmul; tput setaf "$colorignorehidden";
+    echo " ($(_countignorehidden))"
+}
+
+_actionheader() {
+    # information about action currently selected
+    # or executed action, or cancelled one. or nothing.
+    local color="$1"
+    tput setaf "$color";
+    if [ "$action" != "" ];then
+        tput bold; echo ":$action"; tput sgr0;
+    elif [ "$currentaction" != "" ];then
+        echo ":$currentaction $_fileobject"
+    elif [ "$actiondone" != "" ];then
+        echo "$actiondone"; actiondone=""
+    fi
+}
+
+_listfiles() {
+    local color="$1"
+    # list regular files
+    tput setaf "$color"
+    fdfind -t f -d 1 $fdopts | column
+}
+
+_listdirs() {
+    # list directory (in bold)
+    local color="$1"
+    tput setaf "$color"; tput bold;
+    fdfind -t d -d 1 $fdopts | column
+}
+
+_list() {
+    # list files and directory with different colors
+    local cur="$1"
+    local nhi="$2"
+    local act="$3"
+    local fil="$4"
+    local dir="$5"
+    # default colors
+    cur="${cur:=75}"
+    nhi="${nhi:=145}"
+    act="${act:=160}"
+    fil="${fil:=0}"
+    dir="${dir:=2}"
+    tput reset;
+    _header $cur $nhi;
+    _actionheader $act;
+    _listfiles $fil;
+    _listdirs $dir;
+    tput setaf 0; tput sgr0;
+}
+
+_filter() {
+    # filter matches until there is only one left
+    local x="$1"
+    local pattern="$2"
+    # option nopatternreset
+    if [ "$nopatternreset" != false ];then pattern=""; fi
+    while true; do
+# read a new keystroke. replace _list with grey for
+read -p "
+$(_list "" "" "" 145 145)
+$(tput setaf 3)$x$(tput setaf 0)
+$pattern" -N 1 -s char
+        # fuzzy option: initialpattern + .* + char
+        if [ "$fuzzy" == true ];then pattern="${pattern}.*"; fi
+        case "$char" in
+            $'\n') break;;  # stop, no result
+            " ") pattern=""; continue;;  # new pattern
+            /) if [ "$pattern" == "" ];then pattern="^"; continue
+                else pattern="${pattern}\$"; fi;; # a/ -> a$
+            "-") if [ "$pattern" == "" ];then pattern="\-";
+                else pattern="${pattern}-"; fi;;  # /a -> ^a
+            .) pattern="${pattern}\.";;  # escape '.'
+            *) pattern="${pattern}${char}";;  # append
+        esac
+        # filter using the actualised pattern
+        x=$(grep -i "$pattern" <<< "$x")
+        nx=$(wc -l <<< "$x") # count number of matches
+        case "$nx" in
+            0) break;; # stop no result
+            1) echo "$x"; break;; # return it
+            *) continue;; # keep filtering.
+        esac
+    done
+}
+
+_selectwo() {
+    # select a directory or file with a two-letter pattern
+    local firstchar
+    local opts
+    local pattern
+    local ln
+    firstchar="$1"
+    # space prefix: read a new first char and match files.
+    # highlight files instead of directories
+    if [ "$firstchar" == " " ];then
+        read -p "$(_list "" "" "" 3 0)" -n 1 -s firstchar
+        opts=" -t f"; 
+    else
+        opts="${fdopts} -t d";
+    fi
+    # second char
+    read -p "" -n 1 -s secondchar
+    # / has special meaning
+    if [ "$secondchar" == "/" ];then secondchar="$"; fi
+    if [ "$firstchar" == "/" ];then firstchar="^"; fi
+    # aggregate
+    pattern="${firstchar}${secondchar}"
+    pattern="${pattern//-/\\-}"
+    # escape
+    pattern="${pattern//\./\\.}"
+    # if '/.' (^.) then active hiddens
+    if [ "$pattern" == "^\." ];then opts="$opts -H"; fi
+    # get files matching pattern
+    s=$(_fd "$pattern" $opts -d 1)
+    # get number of results
+    ln=$(grep "^$" -v <<< "$s" | wc -l)
+    # if no result, continue
+    if [[ $ln  == 0 ]];then
+        s=""
+    # if more than one result, select one
+    elif [[ $ln > 1 ]];then
+        s=$(_filter "$s" "$pattern")
+    # else: just one, so it stay "as" (selected)
+    fi
+}
+
+_choseaction() {
+    # chose an action to execute on a file
+    read -e -p "
+:r rename   :d delete
+:m move     :c copy
+:q quit
+$(tput setaf 8):. chose destination$(tput setaf 0)
+:" -N 1 action;
+    case "$action" in
+        r*) action=rename;;
+        d*) action=delete;;
+        m*) action=move;;
+        c*) action=copy;;
+        q*) exit 0;;
+        ".") _execute_action "$(pwd)";;
+        ":") action=""; dest=""; _fileobject=""; s=""; 
+            actiondone=cancelled;;
+        *) action=""; actiondone=cancelled;;
+    esac
+}
+
+_confirm() {
+    # confirm before execute destructive action
+    local actiondesc="$1"
+    echo "
+$(tput setaf 1)$actiondesc
+confirm? [y/n]"
+    tput setaf 0;
+}
+
+_goto_bookmark() {
+    local mark="$1"
+    grep "^$mark" "$markfile" | sed -E "s|^$mark\s+||;s|~|${HOME}|"
+}
+
+_add_bookmark() {
+    # remove previous directory with same label
+    # and append new one.
+    local label=$1
+    grep -v "^${label}" "$markfile" | sponge "$markfile" \
+        && echo "${label} $(pwd)" >> "$markfile";
+}
+
+_change_options() {
+    # toggle an option
+    local label
+    read -p "
+!h   hidden:         ${hidden:=false}
+!i   ignored:        ${ignored:=false}
+!f   files:          ${matchfile:=false}
+!c   case-sensitive: ${noignore:=false}
+!F   Fuzzy:          ${fuzzy:=false}
+!a   all
+!n   none
+
+!" -n 1 label;
+    case "$label" in
+        h*) if [ "$hidden" == true ];then hidden=false;
+            else hidden=true; fi;;
+        i*) if [ "$ignored" == true ];then ignored=false;
+            else ignored=true; fi;;
+        f*) if [ "$matchfile" == true ];then matchfile=false;
+            else matchfile=true; fi;;
+        c*) if [ "$casesensitive" == true ];then casesensitive=false;
+            else casesensitive=true; fi;;
+        a*) hidden=true;ignored=true;matchfile=true;;
+        n*) hidden=false;ignored=false;matchfile=false;;
+        esac
+}
+
+_create() {
+    # enter a name for new file
+    local filename
+    read -r -e -p "
+new file name: " -e filename
+    if [ "$filename" != "" ];then
+        touch "$filename" 2>"$logfile" && realpath "$filename"
+    fi
+}
+
+_rename() {
+    # read new name
+    local file="$1"
+    local newname
+    if ! [ -e "$file" ];then actiondone=cancelled; fi
+    read -p "
+rename to : " -e -i "$file" newname;
+
+    if [ "$newname" != "" ];then
+        mv "$file" "$newname" --no-clobber 2>"$logfile" \
+            && actiondone="renamed: $file -> $newname"
+    else
+        actiondone=cancelled
+    fi
+}
+
+_delete() {
+    # delete a dir/file
+    local file="$1"
+    if [ -e "$file" ];then
+        read -p "$(tput setaf 1)
+delete: $file ?$(tput setaf 0) (yes / no)" confirmation;
+        if [[ "$confirmation" =~ [yY] ]];then
+            actiondone=$(rm -r "$file" 2>&1)
+            action=${actiondone:="deleted: $file"}
+        else
+            actiondone=cancelled
+        fi
+    else
+        actiondone=cancelled
+    fi
+}
+
+_moveexecute() {
+    local dest
+    # triggered with :. after a previous selection of a file
+    # with the action `move`. this function add the destination 
+    # and execute the commmand.
+    dest="$1"
+    read -p "$(_confirm "mv $_fileobject -> $dest")" confirmation
+    if [[ "$confirmation" =~ [yY] ]];then
+        mv "$_fileobject" "$dest" --no-clobber;
+        actiondone="moved: $_move_source -> $_move_dest"
+    else
+        actiondone=""
+    fi
+}
+
+_copyexecute() {
+    local dest
+    # see _moveexecute. same but for copy.
+    dest="$1"
+    read -p "$(_confirm "cp $_fileobject -> $dest")" confirmation
+    if [[ "$confirmation" =~ [yY] ]];then
+        cp "$_fileobject" "$dest";
+        actiondone="moved: $_move_source -> $_move_dest"
+    else
+        actiondone=""
+    fi
+}
+
+_execute_action() {
+    local dest
+    # triggered with ":.". add the current directory as the 
+    # target (destination) for a previously selected action.
+    # and execute the action.
+    dest="$1"
+    case "$currentaction" in
+        move) _moveexecute "$dest";;
+        copy) _copyexecute "$dest";;
+        *) exit 1;;
+    esac
+    _fileobject=""
+    currentaction=""
+    action=""
+    s=""
+}
+
+_end() {
+    # create a file then end printing its name if -c flag.
+    # else, end and print current directory.
+    if [ "$endisnewfile" == true ];then _create;
+    else pwd; fi;
+    exit 0
+}
+
+_fzf_subd() {
+    # fzf recursive search
+    _fd -t d $fdopts \ | fzf \
+        --no-border --padding=0 --margin=0 --height=30% \
+        --bind=zero:abort --bind=backward-eof:abort
+}
+
+while true;
+do
+
+    # actualise options
+    fdopts=""
+    if [ "$ignored" == true ];then fdopts="${fdopts} -I "; fi
+    if [ "$hidden" == true ];then fdopts="${fdopts} -H "; fi
+    if [ "$casesensitive" == true ];then fdopts="${fdopts} -s "; fi
+    if [ "$matchfile" == true ];then fdopts="${fdopts} -t f "; fi
+    # get first char
+    read -N1 -p "$(_list)
+$(tput setaf 3)//$(tput setaf 0)" firstchar
+    # here and not in _list, which runs in a subshell.
+    if [ "$actiondone" != "" ];then actiondone=""; fi
+    case "$firstchar" in
+        # select with two-letter pattern
+        [a-zA-Z0-9_/-]|" ") _selectwo "$firstchar";;
+        # parent
+        ".") cd ..; continue;;
+        # create
+        ",") s=$(_create);;
+        # end
+        $'\n'|"\r"|"\t") _end;;
+        # home
+        "~") cd ~; continue;;
+        # fzf
+        ";") s=$(_fzf_subd);;
+        # help
+        "?") read -p "$shorthelp" -n 1; continue;;
+        # options
+        "!") _change_options; continue;;
+        # chose action
+        ":") _choseaction; continue;;
+        # go to bookmark
+        "'") 
+            read -p "
+$(<$markfile)
+//" -n 1 -s mark;
+            if [ "$mark" == "-" ];then cd -; continue; fi;
+            s=$(_goto_bookmark $mark);;
+
+        # add bookmark
+        '+') read -p "
+label for $(pwd):
+$firstchar" -n 1 -s label; 
+            if [[ "$label" =~ [a-z] ]];then
+                _add_bookmark "$label"; fi; continue;;
+
+        # everything else is unrecognized (to avoid errors).
+        *) read -p "unrecognized: $firstchar" -n 1 none; continue ;;
+
+    esac
+
+    # call function depending of action.
+    # it works differently for actions which require a single type
+    # of object (rename, delete) and those which require an
+    # object and a destination (move, copy).
+    if [ "$action" != "" ];then
+        case "$action" in
+            # single target
+            rename) _rename "$s";;
+            delete) _delete "$s";;
+            # double target: i add a variable `currentaction`. 
+            # the first part of the process only consists in the
+            # selection of an object. the whole process is actually
+            # triggered when `:.` is used.
+            move) _fileobject=$(realpath "$s"); currentaction=move;;
+            copy) _fileobject=$(realpath "$s"); currentaction=copy;;
+        esac
+        # reset (don't reset currentaction!)
+        action=""
+        s=""
+    fi
+
+    # process the selection. if nothing or not a file, continue.
+    # if selection is a directory: continue from into it.
+    # if selection is a fil: get full path, print it and end.
+    if ! test -e "$s";then continue;
+    elif [ -d "$s" ];then cd "$s";
+    elif [ -f "$s" ];then realpath "$s" && break;
+    else cd $(dirname "$s");  # ?
+    fi
+done
