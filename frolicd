@@ -383,8 +383,8 @@ _end() {
 }
 
 _fzf_subd() {
-    # fzf recursive search
-    _fd -t d $fdopts \ | fzf \
+    # fzf recursive search (also files)
+    _fd -t f -t d $fdopts \ | fzf \
         --no-border --padding=0 --margin=0 --height=30% \
         --bind=zero:abort --bind=backward-eof:abort
 }

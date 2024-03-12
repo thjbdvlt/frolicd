@@ -38,16 +38,16 @@ a few examples:
 
 other commands are:
 
-- `.` to go parent directory
-- `~` to go home directory
-- `,` to create a new file and exit as if it was selected.
-- `;` searched recursively through subdirectories using `fzf`.
+- `.` go to parent directory
+- `~` go to home directory
+- `,` create a new file and exit as if it was selected.
+- `;` search recursively through subdirectories using `fzf`.
 - `'[a-z]` jump to bookmark
 - `+[a-z]` add bookmark
 
 selecting a _file_ will end __frolicd__ session and print the selected file to `stdout`, as if you would have used `enter` (`return`) after having selected a directory, which end the frolicd session and output directory name.
 
-as you can see, __frolicd__ is useless in itself because __it nearly doesn't do anything__ appart from changing directory and `echo`ing directory/file name. hence i never call `frolicd` alone, i only have this alias, which `cd` into `frolicd` output if it's a directory, or edit it with `$EDITOR` if it's a regular file:
+as you can see, __frolicd__ is useless in itself because __it nearly doesn't do anything__ appart from changing directory and `echo`ing directory/file name: it's a directory _browser_ and not a file _manager_. hence i never call `frolicd` alone, i only have this alias, which `cd` into `frolicd` output if it's a directory, or edit it with `$EDITOR` if it's a regular file:
 
 ```bash
 alias r='s=$(frolicd); 
